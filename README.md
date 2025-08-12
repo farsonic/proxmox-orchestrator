@@ -13,7 +13,7 @@ This repository contains a complete SDN orchestrator management system for Proxm
 ## Quick Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOURUSERNAME/YOURREPO/main/install-orchestrators.sh | bash
+curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/install-orchestrators.sh | bash
 ```
 
 ## Post-Installation Setup
