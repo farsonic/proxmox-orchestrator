@@ -138,7 +138,7 @@ WorkingDirectory=$DAEMON_DIR
 ExecStart=/usr/bin/python3 $daemon_script --config /etc/pve/sdn/orchestrators.cfg
 Restart=always
 RestartSec=10
-Environment=PVE_TOKEN_SECRET_READ=your-token-secret-here
+EnvironmentFile=$DAEMON_DIR/.env
 
 # Logging
 StandardOutput=journal
@@ -216,6 +216,17 @@ create_systemd_service "proxmox-psm-sync" \
 create_systemd_service "proxmox-afc-sync" \
     "$DAEMON_DIR/afc_sync_daemon.py" \
     "Proxmox AFC Orchestrator Sync Daemon"
+
+# Set up API user and token automatically
+echo ""
+echo "🔑 Setting up API authentication..."
+if setup_api_token; then
+    echo "✅ API authentication configured automatically"
+    auto_token_setup=true
+else
+    echo "⚠️  Automatic token setup failed, manual setup required"
+    auto_token_setup=false
+fi
 
 # Set proper permissions
 echo ""
@@ -307,28 +318,55 @@ fi
 echo ""
 echo "🎉 Installation complete!"
 echo ""
-echo "📋 Next steps:"
-echo ""
-echo "1. 🔑 Set up Proxmox API token for sync daemons:"
-echo "   • Navigate to Datacenter → Permissions → API Tokens"
-echo "   • Create user: sync-daemon@pve"
-echo "   • Create API token: daemon-token"
-echo "   • Grant SDN permissions to the user"
-echo "   • Configure the token:"
-echo ""
-echo "     curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/setup-api-token.sh -o setup-api-token.sh"
-echo "     chmod +x setup-api-token.sh"
-echo "     ./setup-api-token.sh YOUR_TOKEN_SECRET"
-echo ""
-echo "2. 🚀 Start the sync daemons:"
-echo "     sudo systemctl start proxmox-psm-sync"
-echo "     sudo systemctl start proxmox-afc-sync"
-echo ""
-echo "3. 🌐 Access the web interface:"
-echo "   • Clear your browser cache"
-echo "   • Navigate to Datacenter → SDN"
-echo "   • You should see an 'Orchestrators' tab"
-echo "   • Click 'Add' to create PSM or AFC orchestrators"
+
+if [ "$auto_token_setup" = true ]; then
+    echo "✅ Fully automated setup completed successfully!"
+    echo ""
+    echo "📋 What was configured:"
+    echo "   • API user: sync-daemon@pve"
+    echo "   • API token: daemon-token" 
+    echo "   • Environment file: $DAEMON_DIR/.env"
+    echo "   • Systemd services configured with authentication"
+    echo ""
+    echo "🚀 Starting sync daemons automatically..."
+    systemctl start proxmox-psm-sync
+    systemctl start proxmox-afc-sync
+    
+    # Wait a moment and check status
+    sleep 3
+    echo ""
+    echo "📊 Service status:"
+    for service in "proxmox-psm-sync" "proxmox-afc-sync"; do
+        if systemctl is-active --quiet "$service"; then
+            echo "   ✅ $service is running"
+        else
+            echo "   ⚠️  $service is not running - check logs"
+        fi
+    done
+    
+    echo ""
+    echo "🌐 Ready to use:"
+    echo "   • Navigate to Datacenter → SDN → Orchestrators"
+    echo "   • Click 'Add' to create PSM or AFC orchestrators"
+    echo "   • The sync daemons will automatically sync your configurations"
+    
+else
+    echo "⚠️  Manual token setup required!"
+    echo ""
+    echo "📋 Next steps:"
+    echo ""
+    echo "1. 🔑 Set up API token manually:"
+    echo "   curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/setup-api-token.sh -o setup-api-token.sh"
+    echo "   chmod +x setup-api-token.sh"
+    echo "   ./setup-api-token.sh YOUR_TOKEN_SECRET"
+    echo ""
+    echo "2. 🚀 Start the sync daemons:"
+    echo "     sudo systemctl start proxmox-psm-sync"
+    echo "     sudo systemctl start proxmox-afc-sync"
+    echo ""
+    echo "3. 🌐 Access the web interface:"
+    echo "   • Navigate to Datacenter → SDN → Orchestrators"
+fi
 echo ""
 echo "📊 Monitor daemon status:"
 echo "   sudo systemctl status proxmox-psm-sync"
