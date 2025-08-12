@@ -130,28 +130,32 @@ function remove_javascript() {
     cp "$js_file" "$BACKUP_DIR/pvemanagerlib.js"
     cp "$js_file" "${js_file}.pre-uninstall"
     
-    # Check if our JavaScript exists
-    if ! grep -q "SDN Orchestrators.*Auto-installed" "$js_file"; then
-        print_info "Orchestrators JavaScript not found or not marked as auto-installed"
-        return 0
+    # Remove our complete implementation
+    if grep -q "SDN Orchestrators - Complete Implementation" "$js_file"; then
+        # Find the line number of our installation marker
+        local marker_line
+        marker_line=$(grep -n "// SDN Orchestrators - Complete Implementation" "$js_file" | cut -d: -f1)
+        
+        if [ -n "$marker_line" ]; then
+            # Create new file with everything before our installation
+            head -n $((marker_line - 1)) "$js_file" > "${js_file}.new"
+            mv "${js_file}.new" "$js_file"
+            print_success "Removed JavaScript implementation"
+        else
+            print_warning "Could not find implementation marker"
+        fi
+    else
+        print_info "JavaScript implementation not found"
     fi
     
-    # Remove everything from our marker to end of file, but preserve any content after
-    # This is safer than trying to guess the end
-    
-    # Find the line number of our installation marker
-    local marker_line
-    marker_line=$(grep -n "// SDN Orchestrators.*Auto-installed" "$js_file" | cut -d: -f1)
-    
-    if [ -n "$marker_line" ]; then
-        # Create new file with everything before our installation
-        head -n $((marker_line - 1)) "$js_file" > "${js_file}.new"
-        
-        # Replace original file
-        mv "${js_file}.new" "$js_file"
-        print_success "Removed JavaScript code"
-    else
-        print_warning "Could not find installation marker"
+    # Remove orchestrators from Options panel
+    if grep -A 20 "PVE.sdn.Options" "$js_file" | grep -q "pveSdnOrchestratorView"; then
+        print_info "Removing orchestrators from Options panel..."
+        # Remove the orchestrators block from Options panel
+        sed -i '/pveSdnOrchestratorView/,/border: 0,/d' "$js_file"
+        # Clean up any trailing commas/braces
+        sed -i '/},$/N; /},\n *},/{s/},\n *}/}/;}' "$js_file"
+        print_success "Removed orchestrators from Options panel"
     fi
     
     return 0
@@ -211,9 +215,9 @@ function verify_removal() {
     print_info "Verifying removal..."
     
     local removed_count=0
-    local total_count=6
+    local total_count=8
     
-    # Check that files are removed
+    # Check that files are removed - updated for new structure
     if [ ! -f "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" ]; then
         print_success "API backend removed"
         ((removed_count++))
@@ -226,6 +230,27 @@ function verify_removal() {
         ((removed_count++))
     else
         print_warning "Configuration module still present"
+    fi
+    
+    if [ ! -f "/usr/share/perl5/PVE/Network/SDN/Orchestrators/Plugin.pm" ]; then
+        print_success "Plugin base class removed"
+        ((removed_count++))
+    else
+        print_warning "Plugin base class still present"
+    fi
+    
+    if [ ! -f "/usr/share/perl5/PVE/Network/SDN/Orchestrators/PsmPlugin.pm" ]; then
+        print_success "PSM plugin removed"
+        ((removed_count++))
+    else
+        print_warning "PSM plugin still present"
+    fi
+    
+    if [ ! -f "/usr/share/perl5/PVE/Network/SDN/Orchestrators/AfcPlugin.pm" ]; then
+        print_success "AFC plugin removed"
+        ((removed_count++))
+    else
+        print_warning "AFC plugin still present"
     fi
     
     if ! grep -q "sdnOrchestratorSchema" "/usr/share/pve-manager/js/pvemanagerlib.js" 2>/dev/null; then
@@ -253,9 +278,9 @@ function verify_removal() {
     # Check SDN.pm syntax
     if perl -c /usr/share/perl5/PVE/API2/Network/SDN.pm >/dev/null 2>&1; then
         print_success "SDN.pm syntax is valid"
-        ((removed_count++))
     else
         print_error "SDN.pm has syntax errors!"
+        ((removed_count--))  # This is critical
     fi
     
     return $((total_count - removed_count))
@@ -288,6 +313,7 @@ function confirm_uninstall() {
         echo "   The following will be removed:"
         echo "   • API backend modules"
         echo "   • Configuration modules"
+        echo "   • Plugin classes (PSM and AFC)"
         echo "   • Frontend JavaScript"
         echo "   • Sync daemons and systemd services"
         echo "   • SDN API registration"
@@ -321,10 +347,24 @@ function main() {
     # Remove API user and token
     remove_api_auth
     
-    # Remove backend files
+    # Remove backend files - updated for new structure
     print_info "Removing backend files..."
     safe_remove "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" "API Backend"
     safe_remove "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" "Configuration Module"
+    
+    # Remove plugin files
+    print_info "Removing plugin files..."
+    safe_remove "/usr/share/perl5/PVE/Network/SDN/Orchestrators/Plugin.pm" "Plugin Base Class"
+    safe_remove "/usr/share/perl5/PVE/Network/SDN/Orchestrators/PsmPlugin.pm" "PSM Plugin"
+    safe_remove "/usr/share/perl5/PVE/Network/SDN/Orchestrators/AfcPlugin.pm" "AFC Plugin"
+    
+    # Remove empty plugin directory if it exists
+    if [ -d "/usr/share/perl5/PVE/Network/SDN/Orchestrators" ]; then
+        if [ -z "$(ls -A /usr/share/perl5/PVE/Network/SDN/Orchestrators)" ]; then
+            rmdir "/usr/share/perl5/PVE/Network/SDN/Orchestrators"
+            print_success "Removed empty plugin directory"
+        fi
+    fi
     
     # Remove frontend files
     print_info "Removing frontend files..."
@@ -361,6 +401,7 @@ function main() {
     echo ""
     echo "📋 Summary:"
     echo "   • Removed API backend and configuration modules"
+    echo "   • Removed plugin classes (PSM and AFC)"
     echo "   • Removed frontend JavaScript integration"
     echo "   • Removed sync daemons and systemd services"
     echo "   • Removed API user and token"
