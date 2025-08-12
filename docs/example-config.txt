@@ -1,0 +1,26 @@
+# Example orchestrators.cfg file
+
+psm: PSM-PROD
+    host 192.168.1.100
+    port 443
+    user admin
+    password secret123
+    enabled 1
+    verify_ssl 0
+    poll_interval_seconds 60
+    request_timeout 10
+    reserved_vlans 1,100-200
+    reserved_vrf_names mgmt-vrf,system-vrf
+
+afc: AFC-PROD
+    host 192.168.1.200
+    port 443
+    user admin
+    password secret456
+    fabric_name DC1,DC2
+    enabled 1
+    verify_ssl 1
+    poll_interval_seconds 120
+    request_timeout 30
+    reserved_vlans 1,4094
+    reserved_vrf_names mgmt-vrf
