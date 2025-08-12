@@ -377,16 +377,38 @@ function main() {
     
     # Install backend files
     print_info "Installing backend API module..."
-    install_file "$REPO_BASE/backend/Orchestrators-API.pm" \
+    install_file "$REPO_BASE/PVE/API2/Network/SDN/Orchestrators.pm" \
         "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" \
         "API Backend" \
         "644" \
         "true"
     
     print_info "Installing backend config module..."
-    install_file "$REPO_BASE/backend/Orchestrators-Config.pm" \
+    install_file "$REPO_BASE/PVE/Network/SDN/Orchestrators.pm" \
         "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" \
         "Configuration Module" \
+        "644" \
+        "true"
+    
+    # Install plugin modules
+    print_info "Installing plugin base class..."
+    install_file "$REPO_BASE/PVE/Network/SDN/Orchestrators/Plugin.pm" \
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators/Plugin.pm" \
+        "Plugin Base Class" \
+        "644" \
+        "true"
+    
+    print_info "Installing PSM plugin..."
+    install_file "$REPO_BASE/PVE/Network/SDN/Orchestrators/PsmPlugin.pm" \
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators/PsmPlugin.pm" \
+        "PSM Plugin" \
+        "644" \
+        "true"
+    
+    print_info "Installing AFC plugin..."
+    install_file "$REPO_BASE/PVE/Network/SDN/Orchestrators/AfcPlugin.pm" \
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators/AfcPlugin.pm" \
+        "AFC Plugin" \
         "644" \
         "true"
     
@@ -394,7 +416,7 @@ function main() {
     update_sdn_registration
     
     # Install frontend
-    install_javascript "$REPO_BASE/frontend/orchestrators.js"
+    install_javascript "$REPO_BASE/js/orchestrators.js"
     
     # Install sync daemons
     print_info "Installing sync daemons..."
