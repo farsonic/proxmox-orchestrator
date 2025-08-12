@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Proxmox SDN Orchestrators Installer
+# Bulletproof Proxmox SDN Orchestrators Installer
 # Repository: https://github.com/farsonic/proxmox-orchestrator
 # Usage: curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/install-orchestrators.sh | bash
 
@@ -10,374 +10,451 @@ REPO_BASE="https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main"
 BACKUP_DIR="/root/orchestrators-backup-$(date +%Y%m%d-%H%M%S)"
 DAEMON_DIR="/opt/proxmox-sdn-orchestrators"
 
-echo "🚀 Installing Proxmox SDN Orchestrators with Sync Daemons..."
+# Helper Functions
+function print_info() { echo -e "\e[34m[INFO]\e[0m $1"; }
+function print_success() { echo -e "\e[32m[SUCCESS]\e[0m $1"; }
+function print_warning() { echo -e "\e[33m[WARNING]\e[0m $1"; }
+function print_error() { echo -e "\e[31m[ERROR]\e[0m $1" >&2; }
+
+echo "🚀 Installing Proxmox SDN Orchestrators..."
 echo "📦 Repository: https://github.com/farsonic/proxmox-orchestrator"
 echo ""
 
-# Create backup directory
-mkdir -p "$BACKUP_DIR"
-echo "📁 Created backup directory: $BACKUP_DIR"
-
-# Create daemon directory
-mkdir -p "$DAEMON_DIR"
-echo "📁 Created daemon directory: $DAEMON_DIR"
-
-# Function to backup file if it exists
-backup_file() {
-    local file="$1"
-    if [ -f "$file" ]; then
-        echo "💾 Backing up $file"
-        cp "$file" "$BACKUP_DIR/"
+# Pre-flight checks
+function preflight_checks() {
+    print_info "Running pre-flight checks..."
+    
+    # Check if running as root
+    if [ "$EUID" -ne 0 ]; then
+        print_error "This script must be run as root. Please run: sudo $0"
+        exit 1
     fi
+    
+    # Check if this is a Proxmox system
+    if [ ! -f "/usr/share/perl5/PVE/API2/Network/SDN.pm" ]; then
+        print_error "This doesn't appear to be a Proxmox VE system. SDN.pm not found."
+        exit 1
+    fi
+    
+    # Check that core SDN.pm has valid syntax
+    if ! perl -c /usr/share/perl5/PVE/API2/Network/SDN.pm >/dev/null 2>&1; then
+        print_error "Core SDN.pm has syntax errors. Please repair Proxmox installation first."
+        exit 1
+    fi
+    
+    # Check internet connectivity
+    if ! curl -fsSL --connect-timeout 10 "$REPO_BASE/README.md" >/dev/null 2>&1; then
+        print_error "Cannot connect to GitHub repository. Check internet connection."
+        exit 1
+    fi
+    
+    print_success "Pre-flight checks passed"
 }
 
-# Function to download and install file
-install_file() {
+# Create backup of existing files
+function create_backups() {
+    print_info "Creating backup directory..."
+    mkdir -p "$BACKUP_DIR"
+    
+    # Backup files that we'll modify
+    local files_to_backup=(
+        "/usr/share/perl5/PVE/API2/Network/SDN.pm"
+        "/usr/share/pve-manager/js/pvemanagerlib.js"
+        "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm"
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm"
+    )
+    
+    for file in "${files_to_backup[@]}"; do
+        if [ -f "$file" ]; then
+            print_info "Backing up $file"
+            cp "$file" "$BACKUP_DIR/" 2>/dev/null || print_warning "Could not backup $file"
+        fi
+    done
+    
+    print_success "Created backup directory: $BACKUP_DIR"
+}
+
+# Download and validate file before installing
+function install_file() {
     local url="$1"
     local dest="$2"
     local description="$3"
-    local permissions="$4"
+    local permissions="${4:-644}"
+    local validate_perl="${5:-false}"
     
-    echo "📥 Installing $description..."
-    backup_file "$dest"
+    print_info "Installing $description..."
     
-    # Create directory if it doesn't exist
+    # Create directory if needed
     mkdir -p "$(dirname "$dest")"
     
-    # Download and install
-    if curl -fsSL "$url" -o "$dest"; then
-        chmod "${permissions:-644}" "$dest"
-        echo "✅ Installed $description to $dest"
-    else
-        echo "❌ Failed to download $description from $url"
+    # Download to temporary file first
+    local temp_file="/tmp/$(basename "$dest").tmp"
+    
+    if ! curl -fsSL "$url" -o "$temp_file"; then
+        print_error "Failed to download $description from $url"
         return 1
     fi
-}
-
-# Function to append JavaScript to existing file
-append_javascript() {
-    local js_url="$1"
-    local dest_file="$2"
     
-    echo "📥 Appending JavaScript to $dest_file..."
-    backup_file "$dest_file"
-    
-    # Check if our code is already present
-    if grep -q "SDN Orchestrators" "$dest_file" 2>/dev/null; then
-        echo "⚠️  JavaScript already present in $dest_file, skipping..."
-        return
+    # Validate Perl syntax if requested
+    if [ "$validate_perl" = "true" ]; then
+        if ! perl -c "$temp_file" >/dev/null 2>&1; then
+            print_error "Downloaded $description has syntax errors"
+            rm -f "$temp_file"
+            return 1
+        fi
     fi
     
-    # Download and append JavaScript
-    echo "" >> "$dest_file"
-    echo "// =======================================================================" >> "$dest_file"
-    echo "// SDN Orchestrators - Auto-installed $(date)" >> "$dest_file"
-    echo "// Repository: https://github.com/farsonic/proxmox-orchestrator" >> "$dest_file"
-    echo "// =======================================================================" >> "$dest_file"
+    # Move to final location
+    mv "$temp_file" "$dest"
+    chmod "$permissions" "$dest"
     
-    if curl -fsSL "$js_url" >> "$dest_file"; then
-        echo "✅ Appended JavaScript to $dest_file"
-    else
-        echo "❌ Failed to download JavaScript from $js_url"
-        return 1
-    fi
+    print_success "Installed $description to $dest"
+    return 0
 }
 
-# Function to update SDN.pm registration
-update_sdn_registration() {
+# Update SDN.pm to register our orchestrators API
+function update_sdn_registration() {
     local sdn_file="/usr/share/perl5/PVE/API2/Network/SDN.pm"
     
-    echo "📝 Updating SDN API registration..."
-    backup_file "$sdn_file"
+    print_info "Registering orchestrators API with SDN..."
     
     # Check if already registered
-    if grep -q "PVE::API2::Network::SDN::Orchestrators" "$sdn_file" 2>/dev/null; then
-        echo "⚠️  Orchestrators already registered in SDN.pm, skipping..."
-        return
+    if grep -q "use PVE::API2::Network::SDN::Orchestrators;" "$sdn_file"; then
+        print_warning "Orchestrators API already registered"
+        return 0
     fi
     
-    # Add the import line after other use statements
-    if sed -i '/^use PVE::API2::Network::SDN::/a use PVE::API2::Network::SDN::Orchestrators;' "$sdn_file"; then
-        echo "✅ Added import statement"
-    else
-        echo "❌ Failed to add import statement"
+    # Create a backup before modifying
+    cp "$sdn_file" "${sdn_file}.pre-orchestrators"
+    
+    # Add import after other imports
+    sed -i '/^use PVE::API2::Network::SDN::Fabrics;$/a use PVE::API2::Network::SDN::Orchestrators;' "$sdn_file"
+    
+    # Add API registration after fabrics registration
+    sed -i '/path => "fabrics",/a\    },\
+{\
+    subclass => "PVE::API2::Network::SDN::Orchestrators",\
+    path => "orchestrators",' "$sdn_file"
+    
+    # Validate syntax after modification
+    if ! perl -c "$sdn_file" >/dev/null 2>&1; then
+        print_error "SDN.pm syntax error after modification. Restoring backup."
+        mv "${sdn_file}.pre-orchestrators" "$sdn_file"
         return 1
     fi
     
-    # Add the registration before the final "1;"
-    if sed -i '/^1;$/i \\n__PACKAGE__->register_method({\n    subclass => "PVE::API2::Network::SDN::Orchestrators",\n    path => "orchestrators",\n});' "$sdn_file"; then
-        echo "✅ Added API registration"
-    else
-        echo "❌ Failed to add API registration"
-        return 1
-    fi
+    print_success "Orchestrators API registered with SDN"
+    return 0
 }
 
-# Function to create systemd service
-create_systemd_service() {
-    local service_name="$1"
-    local daemon_script="$2"
-    local description="$3"
+# Add JavaScript to pvemanagerlib.js
+function install_javascript() {
+    local js_url="$1"
+    local js_file="/usr/share/pve-manager/js/pvemanagerlib.js"
     
-    local service_file="/etc/systemd/system/${service_name}.service"
+    print_info "Installing frontend JavaScript..."
     
-    echo "📝 Creating systemd service: $service_name"
-    backup_file "$service_file"
+    # Check if already installed
+    if grep -q "sdnOrchestratorSchema" "$js_file"; then
+        print_warning "JavaScript already installed"
+        return 0
+    fi
     
-    cat > "$service_file" << EOF
+    # Download JavaScript code
+    local js_code
+    if ! js_code=$(curl -fsSL "$js_url"); then
+        print_error "Failed to download JavaScript code"
+        return 1
+    fi
+    
+    # Create backup
+    cp "$js_file" "${js_file}.pre-orchestrators"
+    
+    # Append our JavaScript with clear markers
+    {
+        echo ""
+        echo "// SDN Orchestrators - Auto-installed $(date)"
+        echo "$js_code"
+    } >> "$js_file"
+    
+    print_success "JavaScript installed successfully"
+    return 0
+}
+
+# Set up API token for sync daemons
+function setup_api_token() {
+    print_info "Setting up API authentication..."
+    
+    local pve_user="sync-daemon@pve"
+    local pve_token_name="daemon-token"
+    local token_secret
+    token_secret=$(openssl rand -hex 32)
+    
+    # Create user if it doesn't exist
+    if ! pveum user list | grep -q "^$pve_user"; then
+        pveum user add "$pve_user" --comment "SDN Orchestrator Sync Daemon"
+        print_success "Created user $pve_user"
+    fi
+    
+    # Remove existing token if it exists
+    if pveum user token list "$pve_user" 2>/dev/null | grep -q "$pve_token_name"; then
+        pveum user token delete "$pve_user" "$pve_token_name"
+    fi
+    
+    # Create new token
+    local token_output
+    token_output=$(pveum user token add "$pve_user" "$pve_token_name" --privsep 0)
+    
+    local full_token
+    full_token=$(echo "$token_output" | grep "full-tokenid" | cut -d'=' -f2 | tr -d ' ')
+    
+    if [ -z "$full_token" ]; then
+        print_error "Failed to create API token"
+        return 1
+    fi
+    
+    # Set permissions
+    pveum acl modify / --users "$pve_user" --roles Administrator
+    
+    # Create token configuration file
+    mkdir -p "$DAEMON_DIR"
+    cat > "$DAEMON_DIR/api_token.conf" << EOF
+# Proxmox API Token Configuration
+PVE_HOST=localhost
+PVE_USER=$pve_user
+PVE_TOKEN_ID=$full_token
+PVE_TOKEN_SECRET=$token_secret
+PVE_VERIFY_SSL=false
+EOF
+    
+    chmod 600 "$DAEMON_DIR/api_token.conf"
+    print_success "API authentication configured"
+    return 0
+}
+
+# Create systemd services
+function create_systemd_services() {
+    print_info "Creating systemd services..."
+    
+    # PSM sync service
+    cat > /etc/systemd/system/proxmox-psm-sync.service << 'EOF'
 [Unit]
-Description=$description
-After=network.target pveproxy.service
-Wants=pveproxy.service
+Description=Proxmox PSM Sync Daemon
+After=network.target
+Requires=network.target
 
 [Service]
 Type=simple
 User=root
-Group=root
-WorkingDirectory=$DAEMON_DIR
-ExecStart=/usr/bin/python3 $daemon_script --config /etc/pve/sdn/orchestrators.cfg
+ExecStart=/usr/bin/python3 /opt/proxmox-sdn-orchestrators/psm_sync_daemon.py
 Restart=always
-RestartSec=10
-EnvironmentFile=$DAEMON_DIR/.env
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=$service_name
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-    echo "✅ Created systemd service: $service_file"
+    # AFC sync service
+    cat > /etc/systemd/system/proxmox-afc-sync.service << 'EOF'
+[Unit]
+Description=Proxmox AFC Sync Daemon
+After=network.target
+Requires=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/proxmox-sdn-orchestrators/afc_sync_daemon.py
+Restart=always
+RestartSec=30
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable proxmox-psm-sync proxmox-afc-sync
+    
+    print_success "Systemd services created and enabled"
 }
 
-# Check if running as root
-if [ "$EUID" -ne 0 ]; then
-    echo "❌ This script must be run as root"
-    echo "   Please run: sudo $0"
-    exit 1
-fi
-
-# Check if this is a Proxmox system
-if [ ! -f "/usr/share/perl5/PVE/API2/Network/SDN.pm" ]; then
-    echo "❌ This doesn't appear to be a Proxmox VE system"
-    echo "   SDN.pm not found. Please ensure this is a Proxmox VE server."
-    exit 1
-fi
-
-echo "✅ Running as root on Proxmox VE system"
-
-# Install backend files
-echo ""
-echo "📦 Installing backend files..."
-
-install_file "$REPO_BASE/PVE/API2/Network/SDN/Orchestrators.pm" \
-    "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" \
-    "API Backend"
-
-install_file "$REPO_BASE/PVE/Network/SDN/Orchestrators.pm" \
-    "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" \
-    "Configuration Module"
-
-# Update SDN registration
-echo ""
-echo "📝 Registering with Proxmox SDN API..."
-update_sdn_registration
-
-# Install frontend
-echo ""
-echo "📦 Installing frontend files..."
-append_javascript "$REPO_BASE/js/orchestrators.js" \
-    "/usr/share/pve-manager/js/pvemanagerlib.js"
-
-# Install sync daemons
-echo ""
-echo "📦 Installing sync daemons..."
-
-install_file "$REPO_BASE/daemons/psm_sync_daemon.py" \
-    "$DAEMON_DIR/psm_sync_daemon.py" \
-    "PSM Sync Daemon" \
-    "755"
-
-install_file "$REPO_BASE/daemons/afc_sync_daemon.py" \
-    "$DAEMON_DIR/afc_sync_daemon.py" \
-    "AFC Sync Daemon" \
-    "755"
-
-# Create systemd services
-echo ""
-echo "📦 Creating systemd services..."
-
-create_systemd_service "proxmox-psm-sync" \
-    "$DAEMON_DIR/psm_sync_daemon.py" \
-    "Proxmox PSM Orchestrator Sync Daemon"
-
-create_systemd_service "proxmox-afc-sync" \
-    "$DAEMON_DIR/afc_sync_daemon.py" \
-    "Proxmox AFC Orchestrator Sync Daemon"
-
-# Set up API user and token automatically
-echo ""
-echo "🔑 Setting up API authentication..."
-if setup_api_token; then
-    echo "✅ API authentication configured automatically"
-    auto_token_setup=true
-else
-    echo "⚠️  Automatic token setup failed, manual setup required"
-    auto_token_setup=false
-fi
-
-# Set proper permissions
-echo ""
-echo "🔒 Setting permissions..."
-chown root:root /usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm
-chmod 644 /usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm
-chown root:root /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm
-chmod 644 /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm
-chown -R root:root "$DAEMON_DIR"
-chmod 755 "$DAEMON_DIR"/*.py
-
-# Create config directory if it doesn't exist
-mkdir -p /etc/pve/sdn
-echo "📁 Ensured config directory exists"
-
-# Reload systemd and enable services
-echo ""
-echo "🔄 Setting up systemd services..."
-systemctl daemon-reload
-systemctl enable proxmox-psm-sync.service
-systemctl enable proxmox-afc-sync.service
-
-# Check Perl syntax
-echo ""
-echo "🔍 Verifying Perl modules..."
-if perl -c /usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm >/dev/null 2>&1; then
-    echo "✅ API Backend syntax OK"
-else
-    echo "❌ API Backend syntax error"
-fi
-
-if perl -c /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm >/dev/null 2>&1; then
-    echo "✅ Configuration Module syntax OK"
-else
-    echo "❌ Configuration Module syntax error"
-fi
-
-# Restart Proxmox services
-echo ""
-echo "🔄 Restarting Proxmox services..."
-systemctl restart pveproxy
-systemctl restart pvedaemon
-
-# Wait a moment for services to start
-sleep 3
-
 # Verify installation
-echo ""
-echo "🔍 Verifying installation..."
-
-# Check if API endpoint responds (basic check)
-if systemctl is-active --quiet pveproxy; then
-    echo "✅ Proxmox web service is running"
-else
-    echo "❌ Proxmox web service is not running"
-fi
-
-# Check if files exist and have content
-if [ -f "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" ] && [ -s "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" ]; then
-    echo "✅ API backend file installed"
-else
-    echo "❌ API backend file missing or empty"
-fi
-
-if [ -f "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" ] && [ -s "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" ]; then
-    echo "✅ Configuration module installed"
-else
-    echo "❌ Configuration module missing or empty"
-fi
-
-if grep -q "sdnOrchestratorSchema" "/usr/share/pve-manager/js/pvemanagerlib.js" 2>/dev/null; then
-    echo "✅ Frontend code installed"
-else
-    echo "❌ Frontend code missing"
-fi
-
-if [ -f "$DAEMON_DIR/psm_sync_daemon.py" ] && [ -f "$DAEMON_DIR/afc_sync_daemon.py" ]; then
-    echo "✅ Sync daemons installed"
-else
-    echo "❌ Sync daemons missing"
-fi
-
-if systemctl is-enabled proxmox-psm-sync >/dev/null 2>&1 && systemctl is-enabled proxmox-afc-sync >/dev/null 2>&1; then
-    echo "✅ Systemd services enabled"
-else
-    echo "❌ Systemd services not enabled"
-fi
-
-echo ""
-echo "🎉 Installation complete!"
-echo ""
-
-if [ "$auto_token_setup" = true ]; then
-    echo "✅ Fully automated setup completed successfully!"
-    echo ""
-    echo "📋 What was configured:"
-    echo "   • API user: sync-daemon@pve"
-    echo "   • API token: daemon-token" 
-    echo "   • Environment file: $DAEMON_DIR/.env"
-    echo "   • Systemd services configured with authentication"
-    echo ""
-    echo "🚀 Starting sync daemons automatically..."
-    systemctl start proxmox-psm-sync
-    systemctl start proxmox-afc-sync
+function verify_installation() {
+    print_info "Verifying installation..."
     
-    # Wait a moment and check status
-    sleep 3
-    echo ""
-    echo "📊 Service status:"
-    for service in "proxmox-psm-sync" "proxmox-afc-sync"; do
-        if systemctl is-active --quiet "$service"; then
-            echo "   ✅ $service is running"
+    local errors=0
+    
+    # Check Perl modules syntax
+    if ! perl -c /usr/share/perl5/PVE/API2/Network/SDN.pm >/dev/null 2>&1; then
+        print_error "SDN.pm syntax error"
+        ((errors++))
+    else
+        print_success "SDN.pm syntax OK"
+    fi
+    
+    if [ -f "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" ]; then
+        if ! perl -c /usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm >/dev/null 2>&1; then
+            print_error "Orchestrators API syntax error"
+            ((errors++))
         else
-            echo "   ⚠️  $service is not running - check logs"
+            print_success "Orchestrators API syntax OK"
+        fi
+    fi
+    
+    if [ -f "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" ]; then
+        if ! perl -c /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm >/dev/null 2>&1; then
+            print_error "Orchestrators Config syntax error"
+            ((errors++))
+        else
+            print_success "Orchestrators Config syntax OK"
+        fi
+    fi
+    
+    # Check files exist
+    local required_files=(
+        "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm"
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm"
+        "/opt/proxmox-sdn-orchestrators/psm_sync_daemon.py"
+        "/opt/proxmox-sdn-orchestrators/afc_sync_daemon.py"
+        "/etc/systemd/system/proxmox-psm-sync.service"
+        "/etc/systemd/system/proxmox-afc-sync.service"
+    )
+    
+    for file in "${required_files[@]}"; do
+        if [ -f "$file" ]; then
+            print_success "$(basename "$file") installed"
+        else
+            print_error "$(basename "$file") missing"
+            ((errors++))
         fi
     done
     
-    echo ""
-    echo "🌐 Ready to use:"
-    echo "   • Navigate to Datacenter → SDN → Orchestrators"
-    echo "   • Click 'Add' to create PSM or AFC orchestrators"
-    echo "   • The sync daemons will automatically sync your configurations"
+    return $errors
+}
+
+# Rollback function in case of failure
+function rollback_installation() {
+    print_error "Installation failed. Rolling back changes..."
     
-else
-    echo "⚠️  Manual token setup required!"
+    # Restore backed up files
+    if [ -f "${BACKUP_DIR}/SDN.pm" ]; then
+        cp "${BACKUP_DIR}/SDN.pm" /usr/share/perl5/PVE/API2/Network/SDN.pm
+        print_info "Restored SDN.pm"
+    fi
+    
+    if [ -f "${BACKUP_DIR}/pvemanagerlib.js" ]; then
+        cp "${BACKUP_DIR}/pvemanagerlib.js" /usr/share/pve-manager/js/pvemanagerlib.js
+        print_info "Restored pvemanagerlib.js"
+    fi
+    
+    # Remove any files we created
+    rm -f /usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm
+    rm -f /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm
+    rm -rf /opt/proxmox-sdn-orchestrators
+    rm -f /etc/systemd/system/proxmox-psm-sync.service
+    rm -f /etc/systemd/system/proxmox-afc-sync.service
+    
+    systemctl daemon-reload
+    systemctl restart pveproxy pvedaemon
+    
+    print_info "Rollback completed. System restored to previous state."
+}
+
+# Main installation flow
+function main() {
+    # Set up error handling
+    trap 'rollback_installation; exit 1' ERR
+    
+    preflight_checks
+    create_backups
+    
+    # Install dependencies
+    print_info "Installing dependencies..."
+    apt-get update >/dev/null
+    apt-get install -y python3-requests curl >/dev/null
+    
+    # Install backend files
+    print_info "Installing backend API module..."
+    install_file "$REPO_BASE/backend/Orchestrators-API.pm" \
+        "/usr/share/perl5/PVE/API2/Network/SDN/Orchestrators.pm" \
+        "API Backend" \
+        "644" \
+        "true"
+    
+    print_info "Installing backend config module..."
+    install_file "$REPO_BASE/backend/Orchestrators-Config.pm" \
+        "/usr/share/perl5/PVE/Network/SDN/Orchestrators.pm" \
+        "Configuration Module" \
+        "644" \
+        "true"
+    
+    # Update SDN registration
+    update_sdn_registration
+    
+    # Install frontend
+    install_javascript "$REPO_BASE/frontend/orchestrators.js"
+    
+    # Install sync daemons
+    print_info "Installing sync daemons..."
+    install_file "$REPO_BASE/daemons/psm_sync_daemon.py" \
+        "$DAEMON_DIR/psm_sync_daemon.py" \
+        "PSM Sync Daemon" \
+        "755"
+    
+    install_file "$REPO_BASE/daemons/afc_sync_daemon.py" \
+        "$DAEMON_DIR/afc_sync_daemon.py" \
+        "AFC Sync Daemon" \
+        "755"
+    
+    # Set up API authentication
+    setup_api_token
+    
+    # Create systemd services
+    create_systemd_services
+    
+    # Verify everything before restarting services
+    if ! verify_installation; then
+        print_error "Installation verification failed"
+        exit 1
+    fi
+    
+    # Restart Proxmox services
+    print_info "Restarting Proxmox services..."
+    systemctl restart pveproxy pvedaemon
+    
+    # Wait for services to start
+    sleep 5
+    
+    # Final verification
+    if systemctl is-active --quiet pveproxy && systemctl is-active --quiet pvedaemon; then
+        print_success "Proxmox services restarted successfully"
+    else
+        print_error "Proxmox services failed to start properly"
+        exit 1
+    fi
+    
+    # Disable error trap - we succeeded
+    trap - ERR
+    
     echo ""
-    echo "📋 Next steps:"
+    print_success "Installation completed successfully!"
     echo ""
-    echo "1. 🔑 Set up API token manually:"
-    echo "   curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/setup-api-token.sh -o setup-api-token.sh"
-    echo "   chmod +x setup-api-token.sh"
-    echo "   ./setup-api-token.sh YOUR_TOKEN_SECRET"
+    echo "📋 What was installed:"
+    echo "   • API backend modules"
+    echo "   • Frontend JavaScript interface"
+    echo "   • PSM and AFC sync daemons"
+    echo "   • Systemd services and API authentication"
     echo ""
-    echo "2. 🚀 Start the sync daemons:"
-    echo "     sudo systemctl start proxmox-psm-sync"
-    echo "     sudo systemctl start proxmox-afc-sync"
+    echo "🚀 Next steps:"
+    echo "   1. Access web interface: Datacenter → SDN → Orchestrators"
+    echo "   2. Start sync daemons: systemctl start proxmox-psm-sync proxmox-afc-sync"
+    echo "   3. Monitor logs: journalctl -u proxmox-psm-sync -f"
     echo ""
-    echo "3. 🌐 Access the web interface:"
-    echo "   • Navigate to Datacenter → SDN → Orchestrators"
-fi
-echo ""
-echo "📊 Monitor daemon status:"
-echo "   sudo systemctl status proxmox-psm-sync"
-echo "   sudo systemctl status proxmox-afc-sync"
-echo "   sudo journalctl -u proxmox-psm-sync -f"
-echo "   sudo journalctl -u proxmox-afc-sync -f"
-echo ""
-echo "📁 Backup files saved to: $BACKUP_DIR"
-echo ""
-echo "📖 Documentation: https://github.com/farsonic/proxmox-orchestrator"
-echo "🐛 Issues: https://github.com/farsonic/proxmox-orchestrator/issues"
-echo ""
-echo "🗑️  To uninstall:"
-echo "   curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/uninstall-orchestrators.sh | bash"
+    echo "📁 Backup saved to: $BACKUP_DIR"
+    echo "📖 Documentation: https://github.com/farsonic/proxmox-orchestrator"
+}
+
+# Run the installer
+main "$@"
