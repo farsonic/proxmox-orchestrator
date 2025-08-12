@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/YOURUSERNAME/YOURREPO/main/install-
 
 2. Configure the token:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOURUSERNAME/YOURREPO/main/setup-api-token.sh -o setup-api-token.sh
+curl -fsSL https://raw.githubusercontent.com/farsonic/proxmox-orchestrator/main/setup-api-token.sh -o setup-api-token.sh
 chmod +x setup-api-token.sh
 ./setup-api-token.sh your-token-secret-here
 ```
