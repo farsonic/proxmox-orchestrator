@@ -131,6 +131,9 @@ systemctl enable psm-sync-daemon.service
 systemctl enable afc-sync-daemon.service
 systemctl enable orchestrators-config.path
 
+systemctl start psm-sync-daemon
+systemctl start afc-sync-daemon
+
 echo "Enabled systemd services"
 
 # Set up API token (FIXED PATH AND LOGIC)
@@ -165,7 +168,7 @@ echo "Started config file monitoring"
 
 # 7. Restart services
 echo "Restarting Proxmox services..."
-systemctl restart pveproxy
+systemctl restart pveproxy pvedaemon
 
 echo ""
 echo "Installation complete!"
