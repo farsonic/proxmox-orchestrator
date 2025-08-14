@@ -8,11 +8,38 @@ import os
 import urllib3
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 
 # Suppress InsecureRequestWarning for self-signed certs
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 CONFIG_LOCK = threading.Lock()
+
+def load_environment():
+    """Load environment variables from .env file if it exists"""
+    env_file = Path(__file__).parent / '.env'
+    env_vars = {}
+    
+    # Try to load from .env file first
+    if env_file.exists():
+        try:
+            with open(env_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        key, value = line.split('=', 1)
+                        env_vars[key.strip()] = value.strip()
+            print(f"[INFO] Loaded environment from {env_file}")
+        except Exception as e:
+            print(f"[WARNING] Could not load .env file: {e}")
+    
+    # Override with actual environment variables
+    for key in ['PVE_TOKEN_SECRET_READ', 'PROXMOX_TOKEN_SECRET', 'PVE_TOKEN_SECRET', 
+                'PVE_API_USER', 'PVE_TOKEN_ID', 'PVE_HOST', 'PVE_PORT']:
+        if key in os.environ:
+            env_vars[key] = os.environ[key]
+    
+    return env_vars
 
 def parse_pve_config(path):
     """Parses the Proxmox-style section config file."""
@@ -51,24 +78,36 @@ def parse_pve_config(path):
     except Exception as e:
         print(f"[ERROR] Failed to parse config file {path}: {e}")
         return {'ids': {}}
-        
+
     return config
 
 def get_proxmox_state(session, timeout):
     """Gets Proxmox SDN state, filtering for orchestratable VNETs."""
-    pve_token_secret = os.environ.get('PVE_TOKEN_SECRET_READ')
+    # Load environment variables flexibly
+    env_vars = load_environment()
+    
+    # Try multiple environment variable names for token secret
+    pve_token_secret = (
+        env_vars.get('PVE_TOKEN_SECRET_READ') or 
+        env_vars.get('PROXMOX_TOKEN_SECRET') or
+        env_vars.get('PVE_TOKEN_SECRET')
+    )
+    
     if not pve_token_secret:
-        print("[ERROR] PVE_TOKEN_SECRET_READ environment variable not set.")
+        print("[ERROR] Token secret not found. Checked: PVE_TOKEN_SECRET_READ, PROXMOX_TOKEN_SECRET, PVE_TOKEN_SECRET")
         return None, None
-        
-    prox_host = '127.0.0.1'
-    api_user = 'sync-daemon@pve'
-    token_name = 'daemon-token'
+
+    # Allow configuration of these values via environment
+    prox_host = env_vars.get('PVE_HOST', '127.0.0.1')
+    prox_port = env_vars.get('PVE_PORT', '8006')
+    api_user = env_vars.get('PVE_API_USER', 'sync-daemon@pve')
+    token_name = env_vars.get('PVE_TOKEN_NAME', 'daemon-token')
+    
     headers = {'Authorization': f"PVEAPIToken={api_user}!{token_name}={pve_token_secret}"}
-    
-    zones_url = f"https://{prox_host}:8006/api2/json/cluster/sdn/zones"
-    vnets_url = f"https://{prox_host}:8006/api2/json/cluster/sdn/vnets"
-    
+
+    zones_url = f"https://{prox_host}:{prox_port}/api2/json/cluster/sdn/zones"
+    vnets_url = f"https://{prox_host}:{prox_port}/api2/json/cluster/sdn/vnets"
+
     try:
         zones_response = session.get(zones_url, headers=headers, verify=False, timeout=timeout)
         zones_response.raise_for_status()
@@ -77,13 +116,13 @@ def get_proxmox_state(session, timeout):
         vnets_response = session.get(vnets_url, headers=headers, verify=False, timeout=timeout)
         vnets_response.raise_for_status()
         vnets_data = vnets_response.json().get('data', [])
-        
+
         proxmox_vnets = {
             int(v['tag']): {'vnet': v.get('vnet'), 'zone': v.get('zone')}
             for v in vnets_data
             if v.get('tag') and v.get('isolate-ports') == 1 and v.get('orchestration') == 1
         }
-        
+
         return proxmox_zones, proxmox_vnets
     except requests.exceptions.RequestException as e:
         print(f"[ERROR] Could not get Proxmox config: {e}")
@@ -112,10 +151,10 @@ def get_psm_state(session, psm_config, timeout):
     host = psm_config['host']
     tenant = psm_config.get("tenant", "default")
     verify_ssl = psm_config.get("verify_ssl", False)
-    
+
     vrfs_url = f"https://{host}/configs/network/v1/tenant/{tenant}/virtualrouters"
     networks_url = f"https://{host}/configs/network/v1/networks"
-    
+
     try:
         print("--> Getting Virtual Routers from PSM...")
         vrfs_response = session.get(vrfs_url, verify=verify_ssl, timeout=timeout)
@@ -131,7 +170,7 @@ def get_psm_state(session, psm_config, timeout):
             n.get('spec', {}).get('vlan-id'): {'vrf': n.get('spec', {}).get('virtual-router'), 'name': n.get('meta', {}).get('name')}
             for n in networks_data if n.get('spec', {}).get('vlan-id')
         }
-        
+
         return psm_vrfs, psm_networks
     except (requests.exceptions.RequestException, KeyError, TypeError) as e:
         print(f"    [ERROR] Could not get PSM state: {e}")
@@ -143,10 +182,10 @@ def manage_psm_resource(session, psm_config, method, resource_path, payload=None
     verify_ssl = psm_config.get("verify_ssl", False)
     headers = {"Content-Type": "application/json"}
     url = f"https://{host}{resource_path}"
-    
+
     action = "CREATE" if method.upper() == "POST" else "DELETE"
     print(f"    -> {action} {resource_path.split('?')[0]} '{item_name}'")
-    
+
     if dry_run:
         print("       (dry_run) Skipping execution.")
         return True
@@ -163,11 +202,11 @@ def sync_psm_target(psm_id, config_path, stop_event):
     """Worker function to sync a single PSM target in a loop."""
     proxmox_session = requests.Session()
     psm_session = requests.Session()
-    
+
     poll_interval = 60
 
     while not stop_event.is_set():
-        
+
         full_config = parse_pve_config(config_path)
         psm_config = full_config.get('ids', {}).get(psm_id)
 
@@ -178,13 +217,13 @@ def sync_psm_target(psm_id, config_path, stop_event):
         poll_interval = psm_config.get('poll_interval_seconds', 60)
         timeout = psm_config.get('request_timeout', 15)
         tenant = psm_config.get("tenant", "default")
-        
+
         is_enabled = psm_config.get('enabled', False)
         dry_run = not is_enabled
 
         reserved_zones = set(psm_config.get('reserved_zone_names', []))
         reserved_vlans = set(psm_config.get('reserved_vlans', []))
-        
+
         print(f"\n{'='*20} [PSM: {psm_id}] Sync Cycle {'='*20}")
         if dry_run:
             print(f"--- [PSM: {psm_id}] RUNNING IN DRY-RUN MODE (enabled=0) ---")
@@ -207,27 +246,27 @@ def sync_psm_target(psm_id, config_path, stop_event):
         if current_vrfs is None:
             stop_event.wait(poll_interval)
             continue
-        
+
         print("--> Comparing states and planning actions...")
-        
+
         zones_to_create = desired_zones - current_vrfs - reserved_zones
         zones_to_delete = current_vrfs - desired_zones - reserved_zones
-        
+
         for zone in zones_to_create:
             path = f"/configs/network/v1/tenant/{tenant}/virtualrouters"
             payload = {"meta": {"name": zone, "tenant": tenant}, "spec": {"type": "unknown"}}
             manage_psm_resource(psm_session, psm_config, "POST", path, payload, timeout, dry_run, zone)
-            
+
         for zone in zones_to_delete:
             path = f"/configs/network/v1/tenant/{tenant}/virtualrouters/{zone}"
             manage_psm_resource(psm_session, psm_config, "DELETE", path, None, timeout, dry_run, zone)
 
         desired_vnets_filtered = {t: v for t, v in desired_vnets.items() if t not in reserved_vlans and v.get('zone') not in reserved_zones}
         vnets_to_create = {t: v for t, v in desired_vnets_filtered.items() if t not in current_networks}
-        
+
         # --- CORRECTED LINE ---
         vnets_to_delete = {t: v_info for t, v_info in current_networks.items() if t not in desired_vnets_filtered}
-        
+
         for tag, vnet in vnets_to_create.items():
             zone = vnet['zone']
             if zone in current_vrfs or zone in zones_to_create:
@@ -253,13 +292,26 @@ def sync_psm_target(psm_id, config_path, stop_event):
 
 def main(config_path):
     print("--- Starting PSM Sync Daemon ---")
+    
+    # Load and display environment info at startup
+    env_vars = load_environment()
+    token_found = any(env_vars.get(key) for key in ['PVE_TOKEN_SECRET_READ', 'PROXMOX_TOKEN_SECRET', 'PVE_TOKEN_SECRET'])
+    
+    if token_found:
+        print(f"[INFO] Token secret loaded successfully")
+        print(f"[INFO] PVE Host: {env_vars.get('PVE_HOST', '127.0.0.1')}")
+        print(f"[INFO] PVE Port: {env_vars.get('PVE_PORT', '8006')}")
+        print(f"[INFO] API User: {env_vars.get('PVE_API_USER', 'sync-daemon@pve')}")
+    else:
+        print("[WARNING] No token secret found in environment")
+    
     stop_event = threading.Event()
     threads = {}
-    
+
     try:
         while not stop_event.is_set():
             full_config = parse_pve_config(config_path)
-            
+
             current_targets = {
                 orch_id: details for orch_id, details in full_config.get('ids', {}).items()
                 if details.get('type', '').upper() == 'PSM'
@@ -273,7 +325,7 @@ def main(config_path):
                     thread.daemon = True
                     thread.start()
                     threads[psm_id] = thread
-            
+
             time.sleep(60)
 
     except KeyboardInterrupt:
@@ -282,7 +334,7 @@ def main(config_path):
         for thread in threads.values():
             if thread.is_alive():
                 thread.join()
-    
+
     print("--- All PSM sync threads have been stopped. Exiting. ---")
 
 if __name__ == "__main__":
