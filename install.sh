@@ -35,6 +35,7 @@ cp patchedfiles/pvemanagerlib.js /usr/share/pve-manager/js/pvemanagerlib.js
 cp patchedfiles/VnetPlugin.pm /usr/share/perl5/PVE/Network/SDN/VnetPlugin.pm
 cp patchedfiles/SDN.pm /usr/share/perl5/PVE/API2/Network/SDN.pm
 cp patchedfiles/Orchestrators.pm /usr/share/perl5/PVE/Network/SDN/Orchestrators.pm
+cp patchedfiles/Cluster.pm /usr/share/perl5/PVE/Cluster.pm
 
 # 4. Install daemon components
 echo "Installing sync daemons..."
